@@ -8,7 +8,6 @@ const Storage = (() => {
     theme: "itilquiz.theme",
     session: "itilquiz.activeSession",
     history: "itilquiz.history",
-    explanations: "itilquiz.explanations",
   };
 
   function safeGet(key) {
@@ -71,18 +70,6 @@ const Storage = (() => {
     safeSet(KEYS.history, list.slice(0, 20));
   }
 
-  // ---- explanation cache, keyed by the ORIGINAL pdf question id so it's
-  // reused across every session that happens to draw that question again ----
-  function getExplanation(sourceId) {
-    const all = safeGet(KEYS.explanations) || {};
-    return all[sourceId] || null;
-  }
-  function setExplanation(sourceId, text) {
-    const all = safeGet(KEYS.explanations) || {};
-    all[sourceId] = text;
-    safeSet(KEYS.explanations, all);
-  }
-
   return {
     getTheme,
     setTheme,
@@ -91,7 +78,5 @@ const Storage = (() => {
     clearActiveSession,
     loadHistory,
     pushHistory,
-    getExplanation,
-    setExplanation,
   };
 })();

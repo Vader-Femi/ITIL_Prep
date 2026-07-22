@@ -384,18 +384,14 @@ const UI = (() => {
         detail.hidden = !detail.hidden;
       });
       const explainBtn = el.querySelector(".explain-btn");
-      explainBtn.addEventListener("click", async () => {
+      explainBtn.addEventListener("click", () => {
         const box = el.querySelector(".explain-box");
-        box.hidden = false;
-        box.innerHTML = `<span class="dot-loader"><span></span><span></span><span></span></span>`;
-        explainBtn.disabled = true;
-        try {
-          const text = await QuizAPI.explainQuestion(pq.question);
-          box.textContent = text;
-        } catch (e) {
-          box.textContent = `Explanation unavailable right now. Correct answer: ${pq.question.answer}. ${pq.question.options[pq.question.answer]}`;
+        box.hidden = !box.hidden;
+        if (!box.hidden) {
+          box.textContent =
+            pq.question.explanation ||
+            `Correct answer: ${pq.question.answer}. ${pq.question.options[pq.question.answer]}`;
         }
-        explainBtn.disabled = false;
       });
     });
   }

@@ -35,6 +35,7 @@ const Engine = (() => {
         options,
         answer: newAnswerLetter,
         category: q.category,
+        explanation: q.explanation,
       };
     });
   }

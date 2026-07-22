@@ -26,6 +26,58 @@ const UI = (() => {
     snackbarTimer = setTimeout(() => snackbarEl.classList.remove("show"), 3200);
   }
 
+  // ---------------- Persistent chrome: theme toggle ----------------
+  function applyTheme(theme) {
+    // theme: 'light' | 'dark' | null (null -> follow system, clear override)
+    if (theme) document.documentElement.dataset.theme = theme;
+    else delete document.documentElement.dataset.theme;
+  }
+
+  function currentAppliedTheme() {
+    const explicit = document.documentElement.dataset.theme;
+    if (explicit) return explicit;
+    return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+
+  function initThemeToggle(onToggle) {
+    document.getElementById("theme-toggle").addEventListener("click", () => {
+      const next = currentAppliedTheme() === "dark" ? "light" : "dark";
+      applyTheme(next);
+      onToggle(next);
+    });
+  }
+
+  function setThemeToggleVisible(visible) {
+    document.getElementById("theme-toggle").style.display = visible ? "" : "none";
+  }
+
+  // ---------------- Generic modal (used for the resume prompt) ----------------
+  function showModal(html, wire) {
+    const modalRoot = document.getElementById("modal-root");
+    modalRoot.innerHTML = `<div class="modal-overlay">${html}</div>`;
+    if (wire) wire(modalRoot);
+  }
+  function hideModal() {
+    document.getElementById("modal-root").innerHTML = "";
+  }
+
+  function showResumeModal({ index, total, remainingSeconds }, handlers) {
+    showModal(
+      `<div class="modal-card">
+         <h2>Exam in progress</h2>
+         <p>You were on question ${index + 1} of ${total} with ${fmtTime(remainingSeconds)} left. Pick up where you left off, or start a fresh set.</p>
+         <div class="modal-actions">
+           <button class="btn btn-filled btn-block" id="resume-yes">Resume exam</button>
+           <button class="btn btn-text btn-block" id="resume-no">Start new instead</button>
+         </div>
+       </div>`,
+      () => {
+        document.getElementById("resume-yes").addEventListener("click", () => { hideModal(); handlers.onResume(); });
+        document.getElementById("resume-no").addEventListener("click", () => { hideModal(); handlers.onDiscard(); });
+      }
+    );
+  }
+
   // ---------------- Setup screen ----------------
   function renderSetup({ bank, questionCount, timeMinutes, history }, handlers) {
     const presetsQ = [10, 20, 40, 80];
@@ -134,9 +186,21 @@ const UI = (() => {
             </svg>
             <div class="time-label" id="time-label"></div>
           </div>
+          <button class="pause-btn" id="pause-btn" aria-label="Pause">
+            <svg id="pause-icon" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"></rect><rect x="14" y="5" width="4" height="14" rx="1"></rect></svg>
+          </button>
         </div>
         <div class="q-counter" id="q-counter"></div>
-        <div class="q-viewport" id="q-viewport"></div>
+        <div class="q-viewport" id="q-viewport">
+          <div class="pause-overlay" id="pause-overlay" hidden>
+            <div class="pause-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+            </div>
+            <h3>Paused</h3>
+            <p>Your timer is frozen and the question is hidden. Resume when you're ready.</p>
+            <button class="btn btn-filled" id="resume-btn">Resume</button>
+          </div>
+        </div>
         <div class="quiz-footer">
           <button class="btn btn-icon" id="prev-btn" aria-label="Previous">‹</button>
           <button class="btn btn-filled" id="next-btn">Next</button>
@@ -167,6 +231,23 @@ const UI = (() => {
   function wireQuizChrome(session, handlers) {
     document.getElementById("prev-btn").addEventListener("click", handlers.onPrev);
     document.getElementById("next-btn").addEventListener("click", handlers.onNext);
+    document.getElementById("pause-btn").addEventListener("click", handlers.onPauseToggle);
+    document.getElementById("resume-btn").addEventListener("click", handlers.onPauseToggle);
+  }
+
+  function setPaused(session, isPaused) {
+    const overlay = document.getElementById("pause-overlay");
+    const icon = document.getElementById("pause-icon");
+    const prevBtn = document.getElementById("prev-btn");
+    const nextBtn = document.getElementById("next-btn");
+    if (!overlay) return;
+    overlay.hidden = !isPaused;
+    icon.innerHTML = isPaused
+      ? `<polygon points="5 3 19 12 5 21 5 3"></polygon>` // play
+      : `<rect x="6" y="5" width="4" height="14" rx="1"></rect><rect x="14" y="5" width="4" height="14" rx="1"></rect>`; // pause
+    document.getElementById("pause-btn").setAttribute("aria-label", isPaused ? "Resume" : "Pause");
+    if (prevBtn) prevBtn.disabled = isPaused ? true : !Engine.canGoPrev(session);
+    if (nextBtn) nextBtn.disabled = isPaused;
   }
 
   function renderQuestion(session, handlers, direction) {
@@ -182,7 +263,9 @@ const UI = (() => {
     prevBtn.disabled = !Engine.canGoPrev(session);
     nextBtn.textContent = Engine.canGoNext(session) ? "Next" : "Finish";
 
-    const old = viewport.querySelector(".q-slide");
+    // Grab every slide still in the viewport, not just the first — if a
+    // previous transition hasn't finished, more than one can be present.
+    const oldSlides = Array.from(viewport.querySelectorAll(".q-slide"));
     const enterCls = direction === "back" ? "enter-back" : "enter-fwd";
     const exitCls = direction === "back" ? "exit-back" : "exit-fwd";
 
@@ -197,10 +280,12 @@ const UI = (() => {
       handlers.onSelect(opt.dataset.letter);
     });
 
-    if (old) {
+    oldSlides.forEach((old) => {
       old.classList.add(exitCls);
-      old.addEventListener("animationend", () => old.remove(), { once: true });
-    }
+      const cleanup = () => { if (old.isConnected) old.remove(); };
+      old.addEventListener("animationend", cleanup, { once: true });
+      setTimeout(cleanup, 500); // safety net in case animationend never fires
+    });
   }
 
   function updateOptionSelection(session) {
@@ -247,6 +332,11 @@ const UI = (() => {
             </div>
           </div>
           <span class="score-tag ${passed ? "pass" : "fail"}">${passed ? "Above pass mark (65%)" : "Below pass mark (65%)"}</span>
+        </div>
+
+        <div class="category-panel">
+          <div class="eyebrow">Weak areas</div>
+          ${graded.categoryBreakdown.map(c => categoryRowHtml(c)).join("")}
         </div>
 
         <div class="chip-row" id="review-filter" style="margin-top:22px;">
@@ -310,6 +400,20 @@ const UI = (() => {
     });
   }
 
+  function categoryRowHtml(c) {
+    const tier = c.percentage >= 75 ? "high" : c.percentage >= 50 ? "mid" : "low";
+    return `
+      <div class="category-row">
+        <div class="cat-top">
+          <span class="cat-name">${esc(c.category)}</span>
+          <span class="cat-frac">${c.percentage}% · ${c.correct}/${c.total}</span>
+        </div>
+        <div class="category-bar-track">
+          <div class="category-bar-fill ${tier}" style="width:${c.percentage}%"></div>
+        </div>
+      </div>`;
+  }
+
   function reviewItemHtml(pq, i) {
     const q = pq.question;
     const correctText = q.options[q.answer];
@@ -342,5 +446,21 @@ const UI = (() => {
       </div>`;
   }
 
-  return { renderSetup, renderQuiz, renderQuestion, updateOptionSelection, updateTimer, renderResults, showSnackbar, fmtTime };
+  return {
+    renderSetup,
+    renderQuiz,
+    renderQuestion,
+    updateOptionSelection,
+    updateTimer,
+    renderResults,
+    showSnackbar,
+    fmtTime,
+    applyTheme,
+    currentAppliedTheme,
+    initThemeToggle,
+    setThemeToggleVisible,
+    showResumeModal,
+    hideModal,
+    setPaused,
+  };
 })();

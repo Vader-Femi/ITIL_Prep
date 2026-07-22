@@ -1,67 +1,93 @@
 // ============================================================
-// api.js — on-demand AI explanations + local history persistence.
-// Both are best-effort: if unavailable, the rest of the app
-// (question selection, timer, grading, scoring) works regardless.
+// api.js — on-demand AI explanations, cached permanently per
+// question so the same fixed 333-question bank is never
+// re-explained twice on this device.
+//
+// Tries, in order:
+//   1. Storage.getExplanation() — instant, no network
+//   2. POST /api/explain — your own Vercel serverless function,
+//      if you've deployed api/explain.js with ANTHROPIC_API_KEY set
+//   3. Direct call to api.anthropic.com — works inside Claude's
+//      own artifact preview, not on a plain static deploy
+//   4. Static fallback text — always available, no network needed
 // ============================================================
 const QuizAPI = (() => {
-  const explanationCache = new Map();
+  const inFlightCache = new Map(); // sourceId -> Promise, de-dupes concurrent clicks
 
-  async function explainQuestion(q) {
-    if (explanationCache.has(q.uid)) return explanationCache.get(q.uid);
-
+  function buildPrompt(q) {
     const optionLines = Object.entries(q.options)
       .map(([l, t]) => `${l}. ${t}`)
       .join("\n");
-    const prompt =
+    return (
       `This is an ITIL 4 Foundation exam practice question. In 2-3 short sentences, ` +
       `explain why the correct answer is right, referencing the relevant ITIL 4 concept ` +
       `or practice by name. Be concise and direct — no preamble.\n\n` +
-      `Question: ${q.question}\n${optionLines}\n\nCorrect answer: ${q.answer}`;
+      `Question: ${q.question}\n${optionLines}\n\nCorrect answer: ${q.answer}`
+    );
+  }
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 1000,
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-    if (!response.ok) throw new Error("explain-failed");
-    const data = await response.json();
+  function extractText(data) {
     const text = (data.content || [])
       .filter((b) => b.type === "text")
       .map((b) => b.text)
       .join("\n")
       .trim();
-    if (!text) throw new Error("explain-empty");
-    explanationCache.set(q.uid, text);
+    if (!text) throw new Error("empty-response");
     return text;
   }
 
-  // ---- history (best-effort, personal/non-shared) ----
-  const HISTORY_KEY = "quiz:history";
-
-  async function loadHistory() {
-    try {
-      if (!window.storage) return [];
-      const res = await window.storage.get(HISTORY_KEY, false);
-      return res ? JSON.parse(res.value) : [];
-    } catch (e) {
-      return [];
-    }
+  async function tryServerlessFunction(q) {
+    const res = await fetch("/api/explain", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: q.question, options: q.options, answer: q.answer }),
+    });
+    if (!res.ok) throw new Error("serverless-failed");
+    const data = await res.json();
+    if (!data.explanation) throw new Error("serverless-empty");
+    return data.explanation;
   }
 
-  async function pushHistory(entry) {
-    try {
-      if (!window.storage) return;
-      const list = await loadHistory();
-      list.unshift(entry);
-      await window.storage.set(HISTORY_KEY, JSON.stringify(list.slice(0, 20)), false);
-    } catch (e) {
-      // non-fatal — history is a nice-to-have
-    }
+  async function tryDirectAnthropicCall(q) {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 1000,
+        messages: [{ role: "user", content: buildPrompt(q) }],
+      }),
+    });
+    if (!res.ok) throw new Error("direct-call-failed");
+    return extractText(await res.json());
   }
 
-  return { explainQuestion, loadHistory, pushHistory };
+  async function explainQuestion(q) {
+    const cached = Storage.getExplanation(q.sourceId);
+    if (cached) return cached;
+
+    if (inFlightCache.has(q.sourceId)) return inFlightCache.get(q.sourceId);
+
+    const promise = (async () => {
+      let text;
+      try {
+        text = await tryServerlessFunction(q);
+      } catch (e1) {
+        try {
+          text = await tryDirectAnthropicCall(q);
+        } catch (e2) {
+          inFlightCache.delete(q.sourceId);
+          throw new Error("all-explain-methods-failed");
+        }
+      }
+      Storage.setExplanation(q.sourceId, text);
+      inFlightCache.delete(q.sourceId);
+      return text;
+    })();
+
+    inFlightCache.set(q.sourceId, promise);
+    return promise;
+  }
+
+  return { explainQuestion };
 })();

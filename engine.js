@@ -34,6 +34,7 @@ const Engine = (() => {
         question: q.question,
         options,
         answer: newAnswerLetter,
+        category: q.category,
       };
     });
   }
@@ -46,8 +47,39 @@ const Engine = (() => {
       answers: {}, // uid -> chosen letter
       timeLimitSeconds: Math.round(timeMinutes * 60),
       startedAt: Date.now(),
+      totalPausedMs: 0,
+      pausedAt: null,
       submitted: false,
     };
+  }
+
+  // Reconstruct a session from a saved snapshot (see storage.js), preserving
+  // the exact remaining time it had when saved.
+  function restoreSession(snapshot) {
+    const remaining = Math.max(0, snapshot.remainingSeconds);
+    return {
+      questions: snapshot.questions,
+      index: snapshot.index,
+      answers: snapshot.answers || {},
+      timeLimitSeconds: snapshot.timeLimitSeconds,
+      startedAt: Date.now() - (snapshot.timeLimitSeconds - remaining) * 1000,
+      totalPausedMs: 0,
+      pausedAt: null,
+      submitted: false,
+    };
+  }
+
+  function pause(session) {
+    if (session.pausedAt) return;
+    session.pausedAt = Date.now();
+  }
+  function resume(session) {
+    if (!session.pausedAt) return;
+    session.totalPausedMs += Date.now() - session.pausedAt;
+    session.pausedAt = null;
+  }
+  function isPaused(session) {
+    return !!session.pausedAt;
   }
 
   function currentQuestion(session) {
@@ -73,7 +105,8 @@ const Engine = (() => {
   }
 
   function elapsedSeconds(session) {
-    return (Date.now() - session.startedAt) / 1000;
+    const pausedMs = (session.totalPausedMs || 0) + (session.pausedAt ? Date.now() - session.pausedAt : 0);
+    return (Date.now() - session.startedAt - pausedMs) / 1000;
   }
   function remainingSeconds(session) {
     return Math.max(0, session.timeLimitSeconds - elapsedSeconds(session));
@@ -96,12 +129,25 @@ const Engine = (() => {
       return { question: q, chosen, isCorrect };
     });
     const percentage = total === 0 ? 0 : Math.round((correct / total) * 100);
+
+    const byCategory = {};
+    perQuestion.forEach(({ question, isCorrect }) => {
+      const cat = question.category || "General Concepts";
+      if (!byCategory[cat]) byCategory[cat] = { total: 0, correct: 0 };
+      byCategory[cat].total += 1;
+      if (isCorrect) byCategory[cat].correct += 1;
+    });
+    const categoryBreakdown = Object.entries(byCategory)
+      .map(([category, s]) => ({ category, ...s, percentage: Math.round((s.correct / s.total) * 100) }))
+      .sort((a, b) => a.percentage - b.percentage);
+
     return {
       total,
       correct,
       percentage,
       timeTakenSeconds: Math.min(session.timeLimitSeconds, elapsedSeconds(session)),
       perQuestion,
+      categoryBreakdown,
     };
   }
 
@@ -109,6 +155,10 @@ const Engine = (() => {
     LETTERS,
     buildQuestionSet,
     createSession,
+    restoreSession,
+    pause,
+    resume,
+    isPaused,
     currentQuestion,
     selectAnswer,
     canGoNext,

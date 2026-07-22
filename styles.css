@@ -398,6 +398,7 @@ input[type="range"]::-moz-range-thumb {
   border-radius: var(--shape-sm);
   border: 1.5px solid var(--outline-variant);
   background: var(--surface-container-low);
+  color: var(--on-surface); /* Added this line to enforce text contrast in dark mode */
   transition: border-radius 260ms var(--motion-spring), border-color 200ms, background 200ms, transform 150ms var(--motion-spring);
 }
 .option:active { transform: scale(0.985); }
